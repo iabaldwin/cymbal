@@ -551,36 +551,40 @@ class RobotVisualizer:
 
         # Camera parameters
         camera_distance = 500
-        azimuth = 45  # Horizontal angle
-        elevation = 30  # Vertical angle
+        azimuth = 45
+        elevation = 30
         mouse_pressed = False
         last_mouse_pos = None
         zoom = 1.0
 
-        # Initialize EKF state
+        # Initialize EKF state with initial bias
         state = np.zeros(10)
-        state[:3] = true_trajectory[0]  # Initial position
+        state[:3] = true_trajectory[0] + np.random.normal(0, 5.0, 3)  # Add initial position error
 
-        # Estimate initial velocity from first few points of true trajectory
+        # Estimate initial velocity with bias
         velocity_window = 5
         initial_velocity = (true_trajectory[velocity_window] - true_trajectory[0]) / (velocity_window * dt)
-        velocity_noise = np.random.normal(0, 0.5, 3)  # Add some noise to initial velocity
-        state[3:6] = initial_velocity + velocity_noise
+        velocity_bias = np.random.normal(0, 2.0, 3)  # Add persistent velocity bias
+        state[3:6] = initial_velocity + velocity_bias
+
+        # For acceleration calculation
+        prev_velocity = initial_velocity + velocity_bias
 
         initial_orientation = Rotation.from_euler('xyz', [0, 0, 0]).as_quat()
-        state[6:10] = [initial_orientation[3], *initial_orientation[:3]]  # [qw, qx, qy, qz]
+        state[6:10] = [initial_orientation[3], *initial_orientation[:3]]
 
-        P = np.eye(10) * 0.1  # Initial state covariance
-        Q = np.eye(10) * 0.1  # Process noise covariance
-        R = np.eye(7) * 0.1   # Measurement noise covariance (not used currently)
+        # Increase initial uncertainty
+        P = np.eye(10) * 1.0  # Increased initial uncertainty
+        Q = np.eye(10) * 0.5  # Increased process noise
+        R = np.eye(7) * 0.1
 
-        # Pre-allocate arrays for current trajectories
-        max_display_points = 100  # Only show last N points
+        # Add persistent acceleration bias
+        accel_bias = np.random.normal(0, 0.5, 3)
+
+        # Pre-allocate arrays
+        max_display_points = 100
         current_true = np.zeros((max_display_points, 3))
         current_estimated = np.zeros((max_display_points, 3))
-
-        # Get measurements and their indices
-        measurements, measurement_indices = generate_measurements(true_trajectory, dt)
 
         while running:
             loop_start = time.time()
@@ -620,14 +624,29 @@ class RobotVisualizer:
                     last_mouse_pos = current_mouse_pos
             event_time = time.time() - event_start
 
-            # Update velocity estimate with noise for propagation
+            # Calculate current velocity and acceleration with more noise
             if current_point < len(true_trajectory) - velocity_window:
-                true_velocity = (true_trajectory[current_point + velocity_window] -
-                               true_trajectory[current_point]) / (velocity_window * dt)
-                velocity_noise = np.random.normal(0, 0.5, 3)
-                state[3:6] = true_velocity + velocity_noise
+                # Current velocity with more noise
+                current_velocity = (true_trajectory[current_point + velocity_window] -
+                                  true_trajectory[current_point]) / (velocity_window * dt)
+                current_velocity += velocity_bias  # Add persistent bias
 
-            # EKF prediction step
+                # Acceleration from velocity difference
+                acceleration = (current_velocity - prev_velocity) / dt
+                acceleration_noise = np.random.normal(0, 1.0, 3)  # Increased noise
+                acceleration += acceleration_noise + accel_bias  # Add noise and persistent bias
+
+                # Update state velocity using acceleration
+                state[3:6] += acceleration * dt
+
+                # Add random walks to biases
+                velocity_bias += np.random.normal(0, 0.01, 3)  # Slowly varying bias
+                accel_bias += np.random.normal(0, 0.005, 3)
+
+                # Store velocity for next iteration
+                prev_velocity = current_velocity
+
+            # EKF prediction with updated velocity
             state, P = ekf_predict(state, P, Q, dt)
             estimated_trajectory[current_point] = state[:3]
 
@@ -824,7 +843,7 @@ noisy_velocities = (
 )
 
 def ekf_predict(state, P, Q, dt):
-    """Prediction step of EKF"""
+    """Prediction step of EKF using acceleration-based motion model"""
     # Unpack state
     x, y, z, vx, vy, vz, qw, qx, qy, qz = state
 
@@ -834,8 +853,9 @@ def ekf_predict(state, P, Q, dt):
 
     # State prediction
     state_pred = state.copy()
-    state_pred[0:3] += state_pred[3:6] * dt  # Update position with velocity
-    # Quaternion remains unchanged in prediction
+    # Update position with velocity
+    state_pred[0:3] += state_pred[3:6] * dt + 0.5 * (state_pred[3:6] - state[3:6]) * dt**2
+    # Velocity already updated in main loop using acceleration
 
     # Normalize quaternion
     quat_norm = np.linalg.norm(state_pred[6:10])
