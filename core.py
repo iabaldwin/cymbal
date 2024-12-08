@@ -6,13 +6,16 @@ from pygame.locals import *
 from OpenGL.GL import *
 from OpenGL.GLU import *
 import math
+from scipy.spatial.transform import Rotation
+from OpenGL.GL import shaders
 
 # Define symbolic variables for state and measurement
 x, y, z = sp.symbols('x y z')  # positions
 vx, vy, vz = sp.symbols('vx vy vz')  # velocities
+qw, qx, qy, qz = sp.symbols('qw qx qy qz')  # quaternion orientation
 
-# State vector X = [x, y, z, vx, vy, vz]
-state = sp.Matrix([x, y, z, vx, vy, vz])
+# State vector X = [x, y, z, vx, vy, vz, qw, qx, qy, qz]
+state = sp.Matrix([x, y, z, vx, vy, vz, qw, qx, qy, qz])
 
 # Process model (constant velocity): dx/dt = vx, dy/dt = vy, dz/dt = dz
 # d(vx)/dt = 0, d(vy)/dt = 0, d(vz)/dt = 0
@@ -22,11 +25,15 @@ f = sp.Matrix([
     vz,
     0,
     0,
+    0,
+    0,  # quaternion derivatives are zero for now (constant orientation)
+    0,
+    0,
     0
 ])
 
-# Measurement model (measuring velocities)
-h = sp.Matrix([vx, vy, vz])
+# Measurement model (measuring position and orientation)
+h = sp.Matrix([x, y, z, qw, qx, qy, qz])
 
 # Calculate Jacobians
 F = f.jacobian(state)
@@ -38,34 +45,79 @@ print("\nMeasurement model Jacobian H:")
 print(H)
 
 # Convert symbolic expressions to numerical functions
-F_num = sp.lambdify((x, y, z, vx, vy, vz), F, 'numpy')
-H_num = sp.lambdify((x, y, z, vx, vy, vz), H, 'numpy')
+F_num = sp.lambdify((x, y, z, vx, vy, vz, qw, qx, qy, qz), F, 'numpy')
+H_num = sp.lambdify((x, y, z, vx, vy, vz, qw, qx, qy, qz), H, 'numpy')
 
 # Simulation parameters
 dt = 0.1  # time step
 t = np.arange(0, 10, dt)  # simulation time
 
 # True initial state
-x0 = np.array([0, 0, 0, 1, 0.5, 0.25])  # starting at origin with some velocity
+x0 = np.array([0, 0, 0, 1, 0.5, 0.25, 1, 0, 0, 0])  # starting at origin with some velocity
 
 # Function for numerical integration
 def robot_motion(state, t):
-    return [state[3], state[4], state[5], 0, 0, 0]
+    return [state[3], state[4], state[5], 0, 0, 0, 0, 0, 0, 0]
 
 # Generate true trajectory
 true_states = odeint(robot_motion, x0, t)
 
-# Add noise to velocity measurements
-measurement_noise = 0.1
-measurements = true_states[:, 3:] + np.random.normal(0, measurement_noise, (len(t), 3))
+# Add noise to velocity measurements (separate position and orientation noise)
+position_noise = 0.1
+orientation_noise = 0.05
+
+# Generate noisy measurements for position and orientation
+measurements = np.zeros((len(t), 7))
+measurements[:, :3] = true_states[:, :3] + np.random.normal(0, position_noise, (len(t), 3))  # Position measurements
+
+# Generate orientation measurements (assuming constant orientation for now)
+initial_orientation = Rotation.from_euler('xyz', [0, 0, 0]).as_quat()  # [qx, qy, qz, qw]
+base_orientation = np.array([initial_orientation[3], *initial_orientation[:3]])  # [qw, qx, qy, qz]
+for i in range(len(t)):
+    # Add some noise to orientation
+    euler_noise = np.random.normal(0, orientation_noise, 3)
+    noisy_orientation = Rotation.from_euler('xyz', euler_noise).as_quat()
+    measurements[i, 3:] = [noisy_orientation[3], *noisy_orientation[:3]]  # [qw, qx, qy, qz]
 
 class RobotVisualizer:
     def __init__(self, width=800, height=600):
         pygame.init()
 
-        # Set up display
+        # Set up display with multisampling for antialiasing
+        pygame.display.gl_set_attribute(pygame.GL_MULTISAMPLEBUFFERS, 1)
+        pygame.display.gl_set_attribute(pygame.GL_MULTISAMPLESAMPLES, 4)
         pygame.display.set_mode((width, height), DOUBLEBUF | OPENGL)
         pygame.display.set_caption("3D Robot Trajectory")
+
+        # Store window dimensions
+        self.width = width
+        self.height = height
+
+        # Set up OpenGL
+        glEnable(GL_DEPTH_TEST)
+        glEnable(GL_LIGHTING)
+        glEnable(GL_LIGHT0)
+        glEnable(GL_COLOR_MATERIAL)
+        glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE)
+
+        # Set up lighting with softer parameters
+        glLightfv(GL_LIGHT0, GL_POSITION, (1000.0, 1000.0, 1000.0, 0.0))
+        glLightfv(GL_LIGHT0, GL_AMBIENT, (0.2, 0.2, 0.2, 1.0))
+        glLightfv(GL_LIGHT0, GL_DIFFUSE, (0.3, 0.3, 0.3, 1.0))
+        glLightModelfv(GL_LIGHT_MODEL_AMBIENT, (0.1, 0.1, 0.1, 1.0))
+
+        # Initialize shaders
+        self.grid_shader = self.create_grid_shader()
+
+        # Set up the scene
+        self.resize(width, height)
+
+        # Enable antialiasing
+        glEnable(GL_LINE_SMOOTH)
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        glHint(GL_LINE_SMOOTH_HINT, GL_NICEST)
+        glEnable(GL_MULTISAMPLE)  # Enable multisampling
 
         # Add runway dimensions
         self.runway_length = 300  # Length in meters
@@ -85,70 +137,173 @@ class RobotVisualizer:
         self.rotation_x = 30
         self.rotation_y = 0
 
-        # Set up OpenGL
-        glEnable(GL_DEPTH_TEST)
-        glEnable(GL_LIGHTING)
-        glEnable(GL_LIGHT0)
-        glEnable(GL_COLOR_MATERIAL)
-        glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE)
-
-        # Set up lighting with softer parameters
-        glLightfv(GL_LIGHT0, GL_POSITION, (1000.0, 1000.0, 1000.0, 0.0))  # Directional light from upper right
-        glLightfv(GL_LIGHT0, GL_AMBIENT, (0.2, 0.2, 0.2, 1.0))   # Softer ambient light
-        glLightfv(GL_LIGHT0, GL_DIFFUSE, (0.3, 0.3, 0.3, 1.0))   # Softer diffuse light
-        glLightModelfv(GL_LIGHT_MODEL_AMBIENT, (0.1, 0.1, 0.1, 1.0))  # Softer global ambient light
-
-        # Set up projection
-        self.resize(width, height)
-
         # Add colors for different trajectories
         self.true_color = (1, 0.5, 0)      # Orange for true trajectory
         self.estimated_color = (0, 1, 0.5)  # Cyan for estimated trajectory
         self.measurement_color = (1, 0, 1)  # Magenta for measurements
         self.measurement_size = 5.0
 
-        # Add inset view parameters
+        # Add inset view parameters for both true and estimated views
         self.inset_size = (200, 150)
-        self.inset_position = (20, 20)
+        self.true_inset_position = (20, 20)
+        self.ekf_inset_position = (240, 20)
         self.inset_surface = pygame.Surface(self.inset_size)
         self.inset_texture = glGenTextures(1)
 
         # Increase terrain size and decrease step size for more detail
         self.terrain_size = 2000  # Increased from 500
-        self.terrain_step = 50
+        self.terrain_step = 25    # Halved from 50 for double density
         self.terrain_grid = self.generate_terrain()
 
+        # Add visibility flags for inset view elements
+        self.inset_show_runway = True
+        self.inset_show_grid = True
+        self.inset_show_axes = True
+
+        # Create and bind vertex buffer objects for the grid
+        self.setup_grid_buffers()
+
     def resize(self, width, height):
+        """Handle window resize"""
+        if height == 0:
+            height = 1
+
+        # Update viewport
         glViewport(0, 0, width, height)
+
+        # Set up perspective projection
         glMatrixMode(GL_PROJECTION)
         glLoadIdentity()
-        gluPerspective(45, (width / height), 0.1, 2000.0)
+        gluPerspective(45, float(width)/float(height), 0.1, 2000.0)
 
-    def draw_grid(self):
-        # Calculate grid dimensions
+        # Reset modelview matrix
+        glMatrixMode(GL_MODELVIEW)
+        glLoadIdentity()
+
+        # Store new dimensions
+        self.width = width
+        self.height = height
+
+    def create_grid_shader(self):
+        vertex_shader = """
+        #version 330
+        layout(location = 0) in vec3 position;
+        layout(location = 1) in float height;
+
+        uniform mat4 projection;
+        uniform mat4 modelview;
+
+        out float v_height;
+
+        void main() {
+            gl_Position = projection * modelview * vec4(position, 1.0);
+            v_height = height;
+        }
+        """
+
+        fragment_shader = """
+        #version 330
+        in float v_height;
+
+        out vec4 fragColor;
+
+        void main() {
+            if (v_height == 0.0) {
+                fragColor = vec4(0.2, 0.2, 0.2, 1.0);  // Runway color
+            } else {
+                float t = v_height / 25.0;  // Normalize by max height
+                fragColor = vec4(0.3 + 0.7*t, 0.3*(1.0-t), 0.3*(1.0-t), 1.0);
+            }
+        }
+        """
+
+        # Compile shaders
+        shader = shaders.compileProgram(
+            shaders.compileShader(vertex_shader, GL_VERTEX_SHADER),
+            shaders.compileShader(fragment_shader, GL_FRAGMENT_SHADER)
+        )
+
+        return shader
+
+    def setup_grid_buffers(self):
         grid_points = self.terrain_size // self.terrain_step + 1
         half_grid = grid_points // 2
 
-        # Draw lines along X axis
-        glColor3f(1, 0, 0)  # Red color for terrain
+        # Generate vertices and heights
+        vertices = []
+        heights = []
+
+        # X direction lines
         for i in range(grid_points):
             z = (i - half_grid) * self.terrain_step
-            glBegin(GL_LINE_STRIP)
             for j in range(grid_points):
                 x = (j - half_grid) * self.terrain_step
                 y = self.terrain_grid[i, j]
-                glVertex3f(x, y, z)
-            glEnd()
+                vertices.extend([x, y, z])
+                heights.append(y)
 
-        # Draw lines along Z axis
+        # Z direction lines
         for i in range(grid_points):
             x = (i - half_grid) * self.terrain_step
-            glBegin(GL_LINE_STRIP)
             for j in range(grid_points):
                 z = (j - half_grid) * self.terrain_step
-                y = self.terrain_grid[j, i]  # Note: swapped indices
-                glVertex3f(x, y, z)
-            glEnd()
+                y = self.terrain_grid[j, i]
+                vertices.extend([x, y, z])
+                heights.append(y)
+
+        # Create and bind buffers
+        self.grid_vao = glGenVertexArrays(1)
+        glBindVertexArray(self.grid_vao)
+
+        # Vertex buffer
+        self.grid_vbo = glGenBuffers(1)
+        glBindBuffer(GL_ARRAY_BUFFER, self.grid_vbo)
+        glBufferData(GL_ARRAY_BUFFER, np.array(vertices, dtype=np.float32), GL_STATIC_DRAW)
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, None)
+        glEnableVertexAttribArray(0)
+
+        # Height buffer
+        self.height_vbo = glGenBuffers(1)
+        glBindBuffer(GL_ARRAY_BUFFER, self.height_vbo)
+        glBufferData(GL_ARRAY_BUFFER, np.array(heights, dtype=np.float32), GL_STATIC_DRAW)
+        glVertexAttribPointer(1, 1, GL_FLOAT, GL_FALSE, 0, None)
+        glEnableVertexAttribArray(1)
+
+        glBindVertexArray(0)
+
+    def draw_grid(self):
+        if not self.inset_show_grid:
+            return
+
+        grid_points = self.terrain_size // self.terrain_step + 1
+
+        # Use shader program
+        glUseProgram(self.grid_shader)
+
+        # Set uniforms
+        proj_matrix = glGetFloatv(GL_PROJECTION_MATRIX)
+        mv_matrix = glGetFloatv(GL_MODELVIEW_MATRIX)
+
+        proj_loc = glGetUniformLocation(self.grid_shader, "projection")
+        mv_loc = glGetUniformLocation(self.grid_shader, "modelview")
+
+        glUniformMatrix4fv(proj_loc, 1, GL_FALSE, proj_matrix)
+        glUniformMatrix4fv(mv_loc, 1, GL_FALSE, mv_matrix)
+
+        # Draw grid
+        glBindVertexArray(self.grid_vao)
+
+        # Draw X lines
+        for i in range(grid_points):
+            glDrawArrays(GL_LINE_STRIP, i * grid_points, grid_points)
+
+        # Draw Z lines
+        offset = grid_points * grid_points
+        for i in range(grid_points):
+            glDrawArrays(GL_LINE_STRIP, offset + i * grid_points, grid_points)
+
+        glBindVertexArray(0)
+        glUseProgram(0)
 
     def draw_axes(self, size=100):
         glBegin(GL_LINES)
@@ -166,27 +321,22 @@ class RobotVisualizer:
         glVertex3f(0, 0, size)
         glEnd()
 
-    def draw_robot(self, position, scale=20):
-        x, y, z = position
-
+    def draw_robot(self, position, scale=10):
+        """Draw the robot as coordinate axes"""
         glPushMatrix()
-        glTranslatef(x, y, z)
+        glTranslatef(*position)
 
-        # Draw robot body as a cube since we don't have GLUT
-        glColor3f(0.7, 0.7, 0.7)
-        self.draw_cube(5)
-
-        # Draw robot coordinate frame
+        # Draw coordinate axes
         glBegin(GL_LINES)
-        # X axis
+        # X axis (red)
         glColor3f(1, 0, 0)
         glVertex3f(0, 0, 0)
         glVertex3f(scale, 0, 0)
-        # Y axis
+        # Y axis (green)
         glColor3f(0, 1, 0)
         glVertex3f(0, 0, 0)
         glVertex3f(0, scale, 0)
-        # Z axis
+        # Z axis (blue)
         glColor3f(0, 0, 1)
         glVertex3f(0, 0, 0)
         glVertex3f(0, 0, scale)
@@ -222,14 +372,30 @@ class RobotVisualizer:
             glVertex3f(*point)
         glEnd()
 
-    def draw_measurements(self, points):
-        """Draw measurement points as small spheres"""
+    def draw_measurements(self, points, size=10):
+        """Draw measurement points as coordinate frames"""
         glColor3f(*self.measurement_color)
+
         for point in points:
             glPushMatrix()
             glTranslatef(*point)
-            # Draw point as a small cube since we're not using GLUT
-            self.draw_cube(self.measurement_size)
+
+            # Draw coordinate frame
+            glBegin(GL_LINES)
+            # X axis (red)
+            glColor3f(1, 0, 0)
+            glVertex3f(0, 0, 0)
+            glVertex3f(size, 0, 0)
+            # Y axis (green)
+            glColor3f(0, 1, 0)
+            glVertex3f(0, 0, 0)
+            glVertex3f(0, size, 0)
+            # Z axis (blue)
+            glColor3f(0, 0, 1)
+            glVertex3f(0, 0, 0)
+            glVertex3f(0, 0, size)
+            glEnd()
+
             glPopMatrix()
 
     def handle_input(self):
@@ -240,6 +406,12 @@ class RobotVisualizer:
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:  # Check for escape key
                     return False
+                elif event.key == pygame.K_r:  # Toggle runway
+                    self.inset_show_runway = not self.inset_show_runway
+                elif event.key == pygame.K_g:  # Toggle grid
+                    self.inset_show_grid = not self.inset_show_grid
+                elif event.key == pygame.K_x:  # Toggle axes
+                    self.inset_show_axes = not self.inset_show_axes
 
             elif event.type == pygame.MOUSEBUTTONDOWN:
                 if event.button in [1, 2, 3]:
@@ -270,7 +442,7 @@ class RobotVisualizer:
 
         return True
 
-    def draw_aircraft_view(self, aircraft_position, aircraft_orientation):
+    def draw_aircraft_view(self, aircraft_position, aircraft_orientation, is_true=True):
         """Draw the view from aircraft's camera"""
         # Save current viewport and matrices
         glPushAttrib(GL_VIEWPORT_BIT)
@@ -279,11 +451,39 @@ class RobotVisualizer:
         glMatrixMode(GL_MODELVIEW)
         glPushMatrix()
 
-        # Set up viewport for inset
-        glViewport(self.inset_position[0], self.inset_position[1],
+        # Set up viewport for inset based on whether it's true or estimated view
+        position = self.true_inset_position if is_true else self.ekf_inset_position
+        glViewport(position[0], 
+                   self.height - position[1] - self.inset_size[1],  # Fix viewport position
                    self.inset_size[0], self.inset_size[1])
 
-        # Set up camera projection
+        # Clear depth buffer for this viewport
+        glClear(GL_DEPTH_BUFFER_BIT)
+
+        # Draw solid background first
+        glMatrixMode(GL_PROJECTION)
+        glLoadIdentity()
+        glOrtho(0, 1, 0, 1, -1, 1)
+        glMatrixMode(GL_MODELVIEW)
+        glLoadIdentity()
+        
+        # Disable lighting for background
+        glDisable(GL_LIGHTING)
+        
+        # Draw dark grey background rectangle
+        glColor3f(0.15, 0.15, 0.15)  # Dark grey instead of black
+        glBegin(GL_QUADS)
+        glVertex2f(0, 0)
+        glVertex2f(1, 0)
+        glVertex2f(1, 1)
+        glVertex2f(0, 1)
+        glEnd()
+        
+        # Re-enable lighting for 3D scene
+        glEnable(GL_LIGHTING)
+        glClear(GL_DEPTH_BUFFER_BIT)  # Clear depth after background
+
+        # Set up camera projection for the scene
         glMatrixMode(GL_PROJECTION)
         glLoadIdentity()
         gluPerspective(60, self.inset_size[0]/self.inset_size[1], 0.1, 2000.0)
@@ -292,15 +492,18 @@ class RobotVisualizer:
         glMatrixMode(GL_MODELVIEW)
         glLoadIdentity()
 
-        # Look along the trajectory (forward is -x direction since we start at negative x)
+        # Look along the trajectory
         gluLookAt(aircraft_position[0], aircraft_position[1], aircraft_position[2],  # Camera position
                   aircraft_position[0] + 10, aircraft_position[1], aircraft_position[2],  # Look forward along x-axis
                   0, 1, 0)  # Up vector
 
-        # Draw the entire scene
-        self.draw_grid()
-        self.draw_axes()
-        self.draw_runway()
+        # Draw the scene elements
+        if self.inset_show_grid:
+            self.draw_grid()
+        if self.inset_show_axes:
+            self.draw_axes()
+        if self.inset_show_runway:
+            self.draw_runway()
 
         # Restore previous state
         glMatrixMode(GL_PROJECTION)
@@ -366,36 +569,50 @@ class RobotVisualizer:
             self.draw_axes()
             self.draw_runway()
 
-            # Draw true trajectory
+            # Draw true trajectory and its inset view
             current_true = true_trajectory[:current_point+1]
             if len(current_true) > 0:
                 self.draw_trajectory(current_true, self.true_color)
                 self.draw_robot(current_true[-1], scale=20)
-
-                # Add aircraft view after main scene is drawn
+                # Draw inset view from true position
                 aircraft_pos = current_true[-1]
-                # Calculate orientation from velocity (if available) or use simple forward-facing orientation
                 if len(current_true) > 1:
                     direction = current_true[-1] - current_true[-2]
                     aircraft_orientation = np.arctan2(direction[2], direction[0])
                 else:
                     aircraft_orientation = 0
-                self.draw_aircraft_view(aircraft_pos, aircraft_orientation)
+                self.draw_aircraft_view(aircraft_pos, aircraft_orientation, is_true=True)
 
-            # Draw estimated trajectory
+            # Draw estimated trajectory and its inset view
             current_estimated = estimated_trajectory[:current_point+1]
             if len(current_estimated) > 0:
                 self.draw_trajectory(current_estimated, self.estimated_color)
-                # Draw estimated robot position with smaller scale
                 self.draw_robot(current_estimated[-1], scale=15)
+                # Draw inset view from estimated position
+                ekf_pos = current_estimated[-1]
+                if len(current_estimated) > 1:
+                    direction = current_estimated[-1] - current_estimated[-2]
+                    ekf_orientation = np.arctan2(direction[2], direction[0])
+                else:
+                    ekf_orientation = 0
+                self.draw_aircraft_view(ekf_pos, ekf_orientation, is_true=False)
 
             # Draw measurements if available
             if measurements is not None:
                 self.draw_measurements(measurements)
 
+            # Draw help text
+            self.draw_help_text([
+                "Controls:",
+                "R - Toggle runway in insets",
+                "G - Toggle grid in insets",
+                "X - Toggle axes in insets",
+                "ESC - Exit"
+            ])
+
             pygame.display.flip()
             current_point = (current_point + 1) % len(true_trajectory)
-            clock.tick(60)
+            clock.tick(15)
 
         pygame.quit()
 
@@ -429,8 +646,8 @@ class RobotVisualizer:
 
     def generate_terrain(self):
         grid_points = self.terrain_size // self.terrain_step + 1
-        # Generate random heights, but keep the runway area flat
-        terrain = np.random.uniform(0, 50, (grid_points, grid_points))
+        # Generate random heights with halved maximum height
+        terrain = np.random.uniform(0, 25, (grid_points, grid_points))  # Halved from 50
 
         # Create a flat area for the runway and surrounding buffer
         center = grid_points // 2
@@ -481,6 +698,15 @@ class RobotVisualizer:
 
         return terrain
 
+    def draw_help_text(self, lines):
+        """Draw help text in the corner of the screen"""
+        font = pygame.font.Font(None, 24)
+        y = 20
+        for line in lines:
+            text = font.render(line, True, (255, 255, 255))
+            pygame.display.get_surface().blit(text, (10, y))
+            y += 20
+
 # Generate landing approach trajectory
 t = np.arange(0, 20, 0.1)
 initial_altitude = 100  # Start at 100m above runway
@@ -496,7 +722,7 @@ true_trajectory = np.column_stack((x, y, z))
 
 # Generate noisy measurements every 20 steps
 measurement_indices = np.arange(0, len(true_trajectory), 20)
-measurement_noise = 10.0  # Adjust this value to control noise magnitude
+measurement_noise = 4.0  # Reduced from 10.0
 noisy_measurements = true_trajectory[measurement_indices] + np.random.normal(0, measurement_noise, (len(measurement_indices), 3))
 
 # Calculate velocity estimates from position deltas
@@ -505,10 +731,10 @@ velocity_estimates[1:] = (true_trajectory[1:] - true_trajectory[:-1]) / dt
 velocity_estimates[0] = velocity_estimates[1]
 
 # Create non-Gaussian noise with multiple components
-velocity_noise_gaussian = 4.0  # Base Gaussian noise
-velocity_noise_uniform = 2.0   # Uniform noise range
-velocity_noise_random_walk = 0.1  # Random walk component
-velocity_bias = np.array([0.5, -0.3, 0.2])  # Systematic bias
+velocity_noise_gaussian = 2.0   # Reduced from 4.0
+velocity_noise_uniform = 1.0    # Reduced from 2.0
+velocity_noise_random_walk = 0.05  # Reduced from 0.1
+velocity_bias = np.array([0.2, -0.1, 0.1])  # Reduced from [0.5, -0.3, 0.2]
 
 # Initialize random walk
 random_walk = np.zeros_like(velocity_estimates)
@@ -525,41 +751,124 @@ noisy_velocities = (
     np.random.exponential(2.0, velocity_estimates.shape)  # Add some exponential noise
 )
 
-def ekf_update(state, P, velocity_estimate, Q, R, dt):
-    # Predict step using provided noisy velocity estimate
-    x, y, z, vx, vy, vz = state
-
-    # Update velocities from estimate
-    vx, vy, vz = velocity_estimate
+def ekf_update(state, P, measurement, Q, R, dt):
+    # Unpack state
+    x, y, z, vx, vy, vz, qw, qx, qy, qz = state
 
     # Calculate Jacobian F at current state
-    F = F_num(x, y, z, vx, vy, vz)
+    F = F_num(x, y, z, vx, vy, vz, qw, qx, qy, qz)
     F = np.array(F, dtype=float)
 
-    # State transition with estimated velocities
-    state_pred = state + np.array([vx, vy, vz, 0, 0, 0]) * dt
-    state_pred[3:] = velocity_estimate  # Update velocity states
+    # State transition
+    state_pred = state.copy()
+    # Update position with velocity (only once)
+    state_pred[0:3] += state[3:6] * dt
+    # Update velocities from measurements
+    state_pred[3:6] = measurement[:3]  # Direct velocity measurement
+    # Quaternion prediction (remains unchanged for now)
+
+    # Normalize quaternion part
+    quat_norm = np.linalg.norm(state_pred[6:10])
+    if quat_norm > 0:
+        state_pred[6:10] /= quat_norm
 
     # Covariance prediction
     P_pred = F @ P @ F.T + Q
 
-    # No measurement updates for now
+    # TEMPORARILY DISABLED: Measurement update
+    """
+    # Measurement update
+    H = H_num(x, y, z, vx, vy, vz, qw, qx, qy, qz)
+    H = np.array(H, dtype=float)
+
+    # Innovation
+    z_pred = H @ state_pred
+    innovation = measurement - z_pred
+
+    # Innovation covariance
+    S = H @ P_pred @ H.T + R
+
+    # Kalman gain
+    K = P_pred @ H.T @ np.linalg.inv(S)
+
+    # Update state and covariance
+    state = state_pred + K @ innovation
+    P = (np.eye(10) - K @ H) @ P_pred
+    """
+
+    # Just use prediction for now
     state = state_pred
     P = P_pred
 
+    # Normalize quaternion after update
+    quat_norm = np.linalg.norm(state[6:10])
+    if quat_norm > 0:
+        state[6:10] /= quat_norm
+
     return state, P
 
-# Run EKF with velocity estimates
+# First, update the measurement generation
+def generate_measurements(true_trajectory, dt):
+    # Calculate velocities from position deltas
+    velocity_estimates = np.zeros_like(true_trajectory)
+    velocity_estimates[1:] = (true_trajectory[1:] - true_trajectory[:-1]) / dt
+    velocity_estimates[0] = velocity_estimates[1]
+
+    # Generate noise components
+    velocity_noise_gaussian = 2.0
+    velocity_noise_uniform = 1.0
+    velocity_noise_random_walk = 0.05
+    velocity_bias = np.array([0.2, -0.1, 0.1])
+
+    # Initialize random walk
+    random_walk = np.zeros_like(velocity_estimates)
+    for i in range(1, len(random_walk)):
+        random_walk[i] = random_walk[i-1] + np.random.normal(0, velocity_noise_random_walk, 3)
+
+    # Combine different noise sources for velocity
+    noisy_velocities = (
+        velocity_estimates +
+        velocity_bias +
+        np.random.normal(0, velocity_noise_gaussian, velocity_estimates.shape) +
+        np.random.uniform(-velocity_noise_uniform, velocity_noise_uniform, velocity_estimates.shape) +
+        random_walk
+    )
+
+    # Generate orientation measurements
+    orientation_measurements = np.zeros((len(true_trajectory), 4))
+    orientation_noise = 0.05
+    initial_orientation = Rotation.from_euler('xyz', [0, 0, 0]).as_quat()
+    base_orientation = np.array([initial_orientation[3], *initial_orientation[:3]])  # [qw, qx, qy, qz]
+
+    for i in range(len(true_trajectory)):
+        euler_noise = np.random.normal(0, orientation_noise, 3)
+        noisy_orientation = Rotation.from_euler('xyz', euler_noise).as_quat()
+        orientation_measurements[i] = [noisy_orientation[3], *noisy_orientation[:3]]
+
+    # Combine velocity and orientation measurements
+    measurements = np.zeros((len(true_trajectory), 7))
+    measurements[:, :3] = noisy_velocities
+    measurements[:, 3:] = orientation_measurements
+
+    return measurements
+
+# Generate measurements
+measurements = generate_measurements(true_trajectory, dt)
+
+# Run EKF with combined measurements
 estimated_trajectory = np.zeros_like(true_trajectory)
-state = np.array([x[0], y[0], z[0], *noisy_velocities[0]])  # Initial state with first velocity estimate
-P = np.eye(6) * 1.0  # Initial state covariance
-Q = np.eye(6) * 0.1  # Process noise covariance
-R = np.eye(3) * measurement_noise  # Measurement noise covariance
+state = np.zeros(10)
+state[:3] = true_trajectory[0]  # Initial position
+initial_orientation = Rotation.from_euler('xyz', [0, 0, 0]).as_quat()
+state[6:10] = [initial_orientation[3], *initial_orientation[:3]]  # [qw, qx, qy, qz]
+
+P = np.eye(10) * 0.5  # Initial state covariance
+Q = np.eye(10) * 0.05  # Process noise covariance
+R = np.eye(7) * measurement_noise  # Measurement noise covariance
 
 for i in range(len(true_trajectory)):
-    # Use noisy velocity estimate for prediction
-    state, P = ekf_update(state, P, noisy_velocities[i], Q, R, dt)
-    estimated_trajectory[i] = state[:3]
+    state, P = ekf_update(state, P, measurements[i], Q, R, dt)
+    estimated_trajectory[i] = state[:3]  # Store position estimates
 
 # Create and run visualizer with both trajectories
 visualizer = RobotVisualizer()
