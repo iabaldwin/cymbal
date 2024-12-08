@@ -272,9 +272,6 @@ class RobotVisualizer:
         glBindVertexArray(0)
 
     def draw_grid(self):
-        if not self.inset_show_grid:
-            return
-
         grid_points = self.terrain_size // self.terrain_step + 1
 
         # Use shader program
@@ -366,11 +363,20 @@ class RobotVisualizer:
         glEnd()
 
     def draw_trajectory(self, points, color):
-        glColor3f(*color)
+        """Draw trajectory line efficiently"""
+        if len(points) < 2:
+            return
+
+        glDisable(GL_LIGHTING)
+        glColor3fv(color)
+
+        # Draw all points in a single line strip
         glBegin(GL_LINE_STRIP)
         for point in points:
-            glVertex3f(*point)
+            glVertex3fv(point)
         glEnd()
+
+        glEnable(GL_LIGHTING)
 
     def draw_measurements(self, points, size=10):
         """Draw measurement points as coordinate frames"""
@@ -453,8 +459,8 @@ class RobotVisualizer:
 
         # Set up viewport for inset based on whether it's true or estimated view
         position = self.true_inset_position if is_true else self.ekf_inset_position
-        glViewport(position[0], 
-                   self.height - position[1] - self.inset_size[1],  # Fix viewport position
+        glViewport(position[0],
+                   self.height - position[1] - self.inset_size[1],
                    self.inset_size[0], self.inset_size[1])
 
         # Clear depth buffer for this viewport
@@ -466,22 +472,22 @@ class RobotVisualizer:
         glOrtho(0, 1, 0, 1, -1, 1)
         glMatrixMode(GL_MODELVIEW)
         glLoadIdentity()
-        
+
         # Disable lighting for background
         glDisable(GL_LIGHTING)
-        
+
         # Draw dark grey background rectangle
-        glColor3f(0.15, 0.15, 0.15)  # Dark grey instead of black
+        glColor3f(0.15, 0.15, 0.15)
         glBegin(GL_QUADS)
         glVertex2f(0, 0)
         glVertex2f(1, 0)
         glVertex2f(1, 1)
         glVertex2f(0, 1)
         glEnd()
-        
+
         # Re-enable lighting for 3D scene
         glEnable(GL_LIGHTING)
-        glClear(GL_DEPTH_BUFFER_BIT)  # Clear depth after background
+        glClear(GL_DEPTH_BUFFER_BIT)
 
         # Set up camera projection for the scene
         glMatrixMode(GL_PROJECTION)
@@ -493,17 +499,17 @@ class RobotVisualizer:
         glLoadIdentity()
 
         # Look along the trajectory
-        gluLookAt(aircraft_position[0], aircraft_position[1], aircraft_position[2],  # Camera position
-                  aircraft_position[0] + 10, aircraft_position[1], aircraft_position[2],  # Look forward along x-axis
-                  0, 1, 0)  # Up vector
+        gluLookAt(aircraft_position[0], aircraft_position[1], aircraft_position[2],
+                  aircraft_position[0] + 10, aircraft_position[1], aircraft_position[2],
+                  0, 1, 0)
 
         # Draw the scene elements
+        # Always draw runway and axes
+        self.draw_runway()
+        self.draw_axes()
+        # Only draw grid if enabled for insets
         if self.inset_show_grid:
             self.draw_grid()
-        if self.inset_show_axes:
-            self.draw_axes()
-        if self.inset_show_runway:
-            self.draw_runway()
 
         # Restore previous state
         glMatrixMode(GL_PROJECTION)
@@ -547,74 +553,108 @@ class RobotVisualizer:
         running = True
         clock = pygame.time.Clock()
 
-        while running:
-            running = self.handle_input()
+        # Camera parameters
+        rotation_x = 0
+        rotation_y = 0
+        zoom = 1.0
+        mouse_pressed = False
+        last_mouse_pos = None
 
-            # Clear screen and set camera
+        # Pre-allocate arrays for current trajectories with correct shape
+        max_display_points = 100  # Only show last N points
+        current_true = np.zeros((max_display_points, 3))
+        current_estimated = np.zeros((max_display_points, 3))
+
+        # Get measurements and their indices
+        measurements, measurement_indices = generate_measurements(true_trajectory, dt)
+
+        while running:
+            # Handle events
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    running = False
+                elif event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_ESCAPE:
+                        running = False
+                    elif event.key == pygame.K_r:
+                        self.inset_show_runway = not self.inset_show_runway
+                    elif event.key == pygame.K_g:
+                        self.inset_show_grid = not self.inset_show_grid
+                    elif event.key == pygame.K_x:
+                        self.inset_show_axes = not self.inset_show_axes
+                elif event.type == pygame.MOUSEBUTTONDOWN:
+                    if event.button == 1:  # Left click
+                        mouse_pressed = True
+                        last_mouse_pos = pygame.mouse.get_pos()
+                    elif event.button == 4:  # Mouse wheel up
+                        zoom *= 0.9
+                    elif event.button == 5:  # Mouse wheel down
+                        zoom *= 1.1
+                elif event.type == pygame.MOUSEBUTTONUP:
+                    if event.button == 1:  # Left click release
+                        mouse_pressed = False
+                elif event.type == pygame.MOUSEMOTION and mouse_pressed:
+                    current_mouse_pos = pygame.mouse.get_pos()
+                    if last_mouse_pos is not None:
+                        dx = current_mouse_pos[0] - last_mouse_pos[0]
+                        dy = current_mouse_pos[1] - last_mouse_pos[1]
+                        rotation_y += dx * 0.5
+                        rotation_x += dy * 0.5
+                    last_mouse_pos = current_mouse_pos
+
+            # Clear screen and set up camera
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
-            glMatrixMode(GL_MODELVIEW)
             glLoadIdentity()
 
-            # Set camera position
-            cam_x = self.camera_distance * math.sin(math.radians(self.rotation_y)) * math.cos(math.radians(self.rotation_x))
-            cam_y = self.camera_distance * math.sin(math.radians(self.rotation_x))
-            cam_z = self.camera_distance * math.cos(math.radians(self.rotation_y)) * math.cos(math.radians(self.rotation_x))
+            # Apply camera transformations with zoom
+            gluLookAt(500 * zoom, 300 * zoom, 500 * zoom,
+                      0, 0, 0,
+                      0, 1, 0)
+            glRotatef(rotation_x, 1, 0, 0)
+            glRotatef(rotation_y, 0, 1, 0)
 
-            gluLookAt(cam_x + self.look_at[0], cam_y + self.look_at[1], cam_z + self.look_at[2],
-                     *self.look_at,
-                     *self.up_vector)
-
-            # Draw scene
+            # Always draw grid in main view
             self.draw_grid()
             self.draw_axes()
             self.draw_runway()
 
-            # Draw true trajectory and its inset view
-            current_true = true_trajectory[:current_point+1]
-            if len(current_true) > 0:
-                self.draw_trajectory(current_true, self.true_color)
-                self.draw_robot(current_true[-1], scale=20)
-                # Draw inset view from true position
-                aircraft_pos = current_true[-1]
-                if len(current_true) > 1:
-                    direction = current_true[-1] - current_true[-2]
+            # Update current trajectories (only keep last N points)
+            start_idx = max(0, current_point - max_display_points + 1)
+            points_to_show = min(max_display_points, current_point + 1)
+
+            if points_to_show > 0:
+                current_true[:points_to_show] = true_trajectory[max(0, current_point - points_to_show + 1):current_point + 1]
+                current_estimated[:points_to_show] = estimated_trajectory[max(0, current_point - points_to_show + 1):current_point + 1]
+
+                self.draw_trajectory(current_true[:points_to_show], self.true_color)
+                self.draw_robot(current_true[points_to_show-1], scale=20)
+
+                if points_to_show > 1:
+                    direction = current_true[points_to_show-1] - current_true[points_to_show-2]
                     aircraft_orientation = np.arctan2(direction[2], direction[0])
                 else:
                     aircraft_orientation = 0
-                self.draw_aircraft_view(aircraft_pos, aircraft_orientation, is_true=True)
+                self.draw_aircraft_view(current_true[points_to_show-1], aircraft_orientation, is_true=True)
 
-            # Draw estimated trajectory and its inset view
-            current_estimated = estimated_trajectory[:current_point+1]
-            if len(current_estimated) > 0:
-                self.draw_trajectory(current_estimated, self.estimated_color)
-                self.draw_robot(current_estimated[-1], scale=15)
-                # Draw inset view from estimated position
-                ekf_pos = current_estimated[-1]
-                if len(current_estimated) > 1:
-                    direction = current_estimated[-1] - current_estimated[-2]
+                self.draw_trajectory(current_estimated[:points_to_show], self.estimated_color)
+                self.draw_robot(current_estimated[points_to_show-1], scale=15)
+
+                if points_to_show > 1:
+                    direction = current_estimated[points_to_show-1] - current_estimated[points_to_show-2]
                     ekf_orientation = np.arctan2(direction[2], direction[0])
                 else:
                     ekf_orientation = 0
-                self.draw_aircraft_view(ekf_pos, ekf_orientation, is_true=False)
+                self.draw_aircraft_view(current_estimated[points_to_show-1], ekf_orientation, is_true=False)
 
-            # Draw measurements if available
-            if measurements is not None:
-                self.draw_measurements(measurements)
-
-            # Draw help text
-            self.draw_help_text([
-                "Controls:",
-                "R - Toggle runway in insets",
-                "G - Toggle grid in insets",
-                "X - Toggle axes in insets",
-                "ESC - Exit"
-            ])
+            # Draw measurements up to current point
+            current_measurement_idx = np.searchsorted(measurement_indices, current_point)
+            if current_measurement_idx > 0:
+                measurement_points = true_trajectory[measurement_indices[:current_measurement_idx]]
+                self.draw_measurements(measurement_points)
 
             pygame.display.flip()
             current_point = (current_point + 1) % len(true_trajectory)
             clock.tick(15)
-
-        pygame.quit()
 
     def draw_runway(self):
         """Draw runway as a rectangle on the ground"""
@@ -751,7 +791,8 @@ noisy_velocities = (
     np.random.exponential(2.0, velocity_estimates.shape)  # Add some exponential noise
 )
 
-def ekf_update(state, P, measurement, Q, R, dt):
+def ekf_predict(state, P, Q, dt):
+    """Prediction step of EKF"""
     # Unpack state
     x, y, z, vx, vy, vz, qw, qx, qy, qz = state
 
@@ -759,15 +800,12 @@ def ekf_update(state, P, measurement, Q, R, dt):
     F = F_num(x, y, z, vx, vy, vz, qw, qx, qy, qz)
     F = np.array(F, dtype=float)
 
-    # State transition
+    # State prediction
     state_pred = state.copy()
-    # Update position with velocity (only once)
-    state_pred[0:3] += state[3:6] * dt
-    # Update velocities from measurements
-    state_pred[3:6] = measurement[:3]  # Direct velocity measurement
-    # Quaternion prediction (remains unchanged for now)
+    state_pred[0:3] += state_pred[3:6] * dt  # Update position with velocity
+    # Quaternion remains unchanged in prediction
 
-    # Normalize quaternion part
+    # Normalize quaternion
     quat_norm = np.linalg.norm(state_pred[6:10])
     if quat_norm > 0:
         state_pred[6:10] /= quat_norm
@@ -775,8 +813,18 @@ def ekf_update(state, P, measurement, Q, R, dt):
     # Covariance prediction
     P_pred = F @ P @ F.T + Q
 
+    return state_pred, P_pred
+
+def ekf_update(state, P, measurement, Q, R, dt):
+    """Complete EKF step with prediction and update"""
+    # First do prediction
+    state_pred, P_pred = ekf_predict(state, P, Q, dt)
+
     # TEMPORARILY DISABLED: Measurement update
     """
+    # Unpack predicted state
+    x, y, z, vx, vy, vz, qw, qx, qy, qz = state_pred
+
     # Measurement update
     H = H_num(x, y, z, vx, vy, vz, qw, qx, qy, qz)
     H = np.array(H, dtype=float)
@@ -809,10 +857,14 @@ def ekf_update(state, P, measurement, Q, R, dt):
 
 # First, update the measurement generation
 def generate_measurements(true_trajectory, dt):
-    # Calculate velocities from position deltas
-    velocity_estimates = np.zeros_like(true_trajectory)
-    velocity_estimates[1:] = (true_trajectory[1:] - true_trajectory[:-1]) / dt
-    velocity_estimates[0] = velocity_estimates[1]
+    # Generate measurements at 1/4 of the trajectory points
+    measurement_indices = np.arange(0, len(true_trajectory), 4)
+
+    # Calculate velocities from position deltas (only at measurement points)
+    velocity_estimates = np.zeros((len(measurement_indices), 3))
+    for i, idx in enumerate(measurement_indices[1:], 1):
+        velocity_estimates[i] = (true_trajectory[idx] - true_trajectory[idx-4]) / (4 * dt)
+    velocity_estimates[0] = velocity_estimates[1]  # Copy first velocity
 
     # Generate noise components
     velocity_noise_gaussian = 2.0
@@ -835,27 +887,27 @@ def generate_measurements(true_trajectory, dt):
     )
 
     # Generate orientation measurements
-    orientation_measurements = np.zeros((len(true_trajectory), 4))
+    orientation_measurements = np.zeros((len(measurement_indices), 4))
     orientation_noise = 0.05
     initial_orientation = Rotation.from_euler('xyz', [0, 0, 0]).as_quat()
-    base_orientation = np.array([initial_orientation[3], *initial_orientation[:3]])  # [qw, qx, qy, qz]
+    base_orientation = np.array([initial_orientation[3], *initial_orientation[:3]])
 
-    for i in range(len(true_trajectory)):
+    for i in range(len(measurement_indices)):
         euler_noise = np.random.normal(0, orientation_noise, 3)
         noisy_orientation = Rotation.from_euler('xyz', euler_noise).as_quat()
         orientation_measurements[i] = [noisy_orientation[3], *noisy_orientation[:3]]
 
     # Combine velocity and orientation measurements
-    measurements = np.zeros((len(true_trajectory), 7))
+    measurements = np.zeros((len(measurement_indices), 7))
     measurements[:, :3] = noisy_velocities
     measurements[:, 3:] = orientation_measurements
 
-    return measurements
+    return measurements, measurement_indices
 
 # Generate measurements
-measurements = generate_measurements(true_trajectory, dt)
+measurements, measurement_indices = generate_measurements(true_trajectory, dt)
 
-# Run EKF with combined measurements
+# Initialize EKF state and run filter
 estimated_trajectory = np.zeros_like(true_trajectory)
 state = np.zeros(10)
 state[:3] = true_trajectory[0]  # Initial position
@@ -866,9 +918,18 @@ P = np.eye(10) * 0.5  # Initial state covariance
 Q = np.eye(10) * 0.05  # Process noise covariance
 R = np.eye(7) * measurement_noise  # Measurement noise covariance
 
+# Run EKF for each timestep
+measurement_idx = 0
 for i in range(len(true_trajectory)):
-    state, P = ekf_update(state, P, measurements[i], Q, R, dt)
-    estimated_trajectory[i] = state[:3]  # Store position estimates
+    # Only update with measurement when we have one
+    if measurement_idx < len(measurement_indices) and i == measurement_indices[measurement_idx]:
+        state, P = ekf_update(state, P, measurements[measurement_idx], Q, R, dt)
+        measurement_idx += 1
+    else:
+        # Prediction only when no measurement
+        state, P = ekf_predict(state, P, Q, dt)
+
+    estimated_trajectory[i] = state[:3]
 
 # Create and run visualizer with both trajectories
 visualizer = RobotVisualizer()
