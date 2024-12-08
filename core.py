@@ -172,41 +172,42 @@ class RobotVisualizer:
         #version 330
         layout(location = 0) in vec3 position;
         layout(location = 1) in float height;
-
+        
         uniform mat4 projection;
         uniform mat4 modelview;
-
+        
         out float v_height;
-
+        
         void main() {
             gl_Position = projection * modelview * vec4(position, 1.0);
             v_height = height;
         }
         """
-
+        
         fragment_shader = """
         #version 330
         in float v_height;
-
+        
         out vec4 fragColor;
-
+        
         void main() {
             if (v_height == 0.0) {
-                fragColor = vec4(0.2, 0.2, 0.2, 1.0);  // Runway color
+                fragColor = vec4(0.2, 0.2, 0.2, 1.0);  // Runway color, fully opaque
             } else {
                 float t = v_height / 25.0;  // Normalize by max height
-                // Grey to blue interpolation
-                fragColor = vec4(0.3*(1.0-t), 0.3*(1.0-t), 0.3 + 0.7*t, 1.0);
+                float alpha = min(0.2 + t * 0.8, 1.0);  // More opaque as height increases
+                // Grey to blue interpolation with transparency
+                fragColor = vec4(0.3*(1.0-t), 0.3*(1.0-t), 0.3 + 0.7*t, alpha);
             }
         }
         """
-
+        
         # Compile shaders
         shader = shaders.compileProgram(
             shaders.compileShader(vertex_shader, GL_VERTEX_SHADER),
             shaders.compileShader(fragment_shader, GL_FRAGMENT_SHADER)
         )
-
+        
         return shader
 
     def setup_grid_buffers(self):
@@ -260,6 +261,10 @@ class RobotVisualizer:
 
     def draw_grid(self):
         """Draw the terrain grid using triangle strips"""
+        # Enable blending for transparency
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        
         glUseProgram(self.grid_shader)
         
         # Set uniforms using stored locations
@@ -279,6 +284,9 @@ class RobotVisualizer:
         glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)  # Reset polygon mode
         glBindVertexArray(0)
         glUseProgram(0)
+        
+        # Disable blending
+        glDisable(GL_BLEND)
 
     def draw_axes(self, size=100):
         glBegin(GL_LINES)
