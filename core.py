@@ -548,25 +548,42 @@ class RobotVisualizer:
         current_point = 0
         running = True
         clock = pygame.time.Clock()
-
+        
         # Camera parameters
         rotation_x = 0
         rotation_y = 0
         zoom = 1.0
         mouse_pressed = False
         last_mouse_pos = None
+        
+        # Initialize EKF state
+        state = np.zeros(10)
+        state[:3] = true_trajectory[0]  # Initial position
+        
+        # Estimate initial velocity from first few points of true trajectory
+        velocity_window = 5
+        initial_velocity = (true_trajectory[velocity_window] - true_trajectory[0]) / (velocity_window * dt)
+        velocity_noise = np.random.normal(0, 0.5, 3)  # Add some noise to initial velocity
+        state[3:6] = initial_velocity + velocity_noise
+        
+        initial_orientation = Rotation.from_euler('xyz', [0, 0, 0]).as_quat()
+        state[6:10] = [initial_orientation[3], *initial_orientation[:3]]  # [qw, qx, qy, qz]
 
+        P = np.eye(10) * 0.1  # Initial state covariance
+        Q = np.eye(10) * 0.1  # Process noise covariance
+        R = np.eye(7) * 0.1   # Measurement noise covariance (not used currently)
+        
         # Pre-allocate arrays for current trajectories with correct shape
         max_display_points = 100  # Only show last N points
         current_true = np.zeros((max_display_points, 3))
         current_estimated = np.zeros((max_display_points, 3))
-
+        
         # Get measurements and their indices
         measurements, measurement_indices = generate_measurements(true_trajectory, dt)
-
+        
         while running:
             loop_start = time.time()
-
+            
             # Handle events
             event_start = time.time()
             for event in pygame.event.get():
@@ -601,12 +618,23 @@ class RobotVisualizer:
                         rotation_x += dy * 0.5
                     last_mouse_pos = current_mouse_pos
             event_time = time.time() - event_start
-
+            
+            # Update velocity estimate with noise for propagation
+            if current_point < len(true_trajectory) - velocity_window:
+                true_velocity = (true_trajectory[current_point + velocity_window] - 
+                               true_trajectory[current_point]) / (velocity_window * dt)
+                velocity_noise = np.random.normal(0, 0.5, 3)  # Add noise to velocity
+                state[3:6] = true_velocity + velocity_noise
+            
+            # EKF prediction step
+            state, P = ekf_predict(state, P, Q, dt)
+            estimated_trajectory[current_point] = state[:3]
+            
             # Clear and setup
             setup_start = time.time()
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
             glLoadIdentity()
-
+            
             # Apply camera transformations
             gluLookAt(500 * zoom, 300 * zoom, 500 * zoom,
                       0, 0, 0,
@@ -614,36 +642,36 @@ class RobotVisualizer:
             glRotatef(rotation_x, 1, 0, 0)
             glRotatef(rotation_y, 0, 1, 0)
             setup_time = time.time() - setup_start
-
+            
             # Main scene rendering
             main_render_start = time.time()
             self.draw_grid()
             self.draw_axes()
             self.draw_runway()
             main_render_time = time.time() - main_render_start
-
+            
             # Trajectory updates and rendering
             traj_start = time.time()
             start_idx = max(0, current_point - max_display_points + 1)
             points_to_show = min(max_display_points, current_point + 1)
-
+            
             if points_to_show > 0:
                 current_true[:points_to_show] = true_trajectory[max(0, current_point - points_to_show + 1):current_point + 1]
                 current_estimated[:points_to_show] = estimated_trajectory[max(0, current_point - points_to_show + 1):current_point + 1]
-
+                
                 self.draw_trajectory(current_true[:points_to_show], self.true_color)
                 self.draw_robot(current_true[points_to_show-1], scale=20)
-
+                
                 if points_to_show > 1:
                     direction = current_true[points_to_show-1] - current_true[points_to_show-2]
                     aircraft_orientation = np.arctan2(direction[2], direction[0])
                 else:
                     aircraft_orientation = 0
                 self.draw_aircraft_view(current_true[points_to_show-1], aircraft_orientation, is_true=True)
-
+                
                 self.draw_trajectory(current_estimated[:points_to_show], self.estimated_color)
                 self.draw_robot(current_estimated[points_to_show-1], scale=15)
-
+                
                 if points_to_show > 1:
                     direction = current_estimated[points_to_show-1] - current_estimated[points_to_show-2]
                     ekf_orientation = np.arctan2(direction[2], direction[0])
@@ -651,7 +679,7 @@ class RobotVisualizer:
                     ekf_orientation = 0
                 self.draw_aircraft_view(current_estimated[points_to_show-1], ekf_orientation, is_true=False)
             traj_time = time.time() - traj_start
-
+            
             # Measurements rendering
             meas_start = time.time()
             current_measurement_idx = np.searchsorted(measurement_indices, current_point)
@@ -659,20 +687,20 @@ class RobotVisualizer:
                 measurement_points = true_trajectory[measurement_indices[:current_measurement_idx]]
                 self.draw_measurements(measurement_points)
             meas_time = time.time() - meas_start
-
+            
             # Display update
             display_start = time.time()
             pygame.display.flip()
             display_time = time.time() - display_start
-
+            
             current_point = (current_point + 1) % len(true_trajectory)
-
+            
             total_time = time.time() - loop_start
             print(f"Frame times (ms): Events: {event_time*1000:.1f}, Setup: {setup_time*1000:.1f}, "
                   f"Main render: {main_render_time*1000:.1f}, Trajectories: {traj_time*1000:.1f}, "
                   f"Measurements: {meas_time*1000:.1f}, Display: {display_time*1000:.1f}, "
                   f"Total: {total_time*1000:.1f}")
-
+            
             clock.tick(15)
 
     def draw_runway(self):
