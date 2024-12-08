@@ -8,6 +8,7 @@ from OpenGL.GLU import *
 import math
 from scipy.spatial.transform import Rotation
 from OpenGL.GL import shaders
+import time
 
 # Define symbolic variables for state and measurement
 x, y, z = sp.symbols('x y z')  # positions
@@ -212,7 +213,8 @@ class RobotVisualizer:
                 fragColor = vec4(0.2, 0.2, 0.2, 1.0);  // Runway color
             } else {
                 float t = v_height / 25.0;  // Normalize by max height
-                fragColor = vec4(0.3 + 0.7*t, 0.3*(1.0-t), 0.3*(1.0-t), 1.0);
+                // Grey to blue interpolation
+                fragColor = vec4(0.3*(1.0-t), 0.3*(1.0-t), 0.3 + 0.7*t, 1.0);
             }
         }
         """
@@ -229,52 +231,53 @@ class RobotVisualizer:
         grid_points = self.terrain_size // self.terrain_step + 1
         half_grid = grid_points // 2
 
-        # Generate vertices and heights
+        # Generate grid points using numpy
+        x = np.linspace(-half_grid * self.terrain_step, half_grid * self.terrain_step, grid_points)
+        z = np.linspace(-half_grid * self.terrain_step, half_grid * self.terrain_step, grid_points)
+        X, Z = np.meshgrid(x, z)
+
+        # Create vertices for triangle strips
         vertices = []
         heights = []
 
-        # X direction lines
-        for i in range(grid_points):
-            z = (i - half_grid) * self.terrain_step
+        # Create triangle strips
+        for i in range(grid_points-1):
             for j in range(grid_points):
-                x = (j - half_grid) * self.terrain_step
-                y = self.terrain_grid[i, j]
-                vertices.extend([x, y, z])
-                heights.append(y)
+                # Add two vertices for each column (current and next row)
+                vertices.append([X[i,j], self.terrain_grid[i,j], Z[i,j]])
+                vertices.append([X[i+1,j], self.terrain_grid[i+1,j], Z[i+1,j]])
+                heights.append(self.terrain_grid[i,j])
+                heights.append(self.terrain_grid[i+1,j])
 
-        # Z direction lines
-        for i in range(grid_points):
-            x = (i - half_grid) * self.terrain_step
-            for j in range(grid_points):
-                z = (j - half_grid) * self.terrain_step
-                y = self.terrain_grid[j, i]
-                vertices.extend([x, y, z])
-                heights.append(y)
+        vertices = np.array(vertices, dtype=np.float32)
+        heights = np.array(heights, dtype=np.float32)
 
-        # Create and bind buffers
+        # Create and bind VAO
         self.grid_vao = glGenVertexArrays(1)
         glBindVertexArray(self.grid_vao)
 
         # Vertex buffer
         self.grid_vbo = glGenBuffers(1)
         glBindBuffer(GL_ARRAY_BUFFER, self.grid_vbo)
-        glBufferData(GL_ARRAY_BUFFER, np.array(vertices, dtype=np.float32), GL_STATIC_DRAW)
+        glBufferData(GL_ARRAY_BUFFER, vertices.nbytes, vertices, GL_STATIC_DRAW)
         glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, None)
         glEnableVertexAttribArray(0)
 
         # Height buffer
         self.height_vbo = glGenBuffers(1)
         glBindBuffer(GL_ARRAY_BUFFER, self.height_vbo)
-        glBufferData(GL_ARRAY_BUFFER, np.array(heights, dtype=np.float32), GL_STATIC_DRAW)
+        glBufferData(GL_ARRAY_BUFFER, heights.nbytes, heights, GL_STATIC_DRAW)
         glVertexAttribPointer(1, 1, GL_FLOAT, GL_FALSE, 0, None)
         glEnableVertexAttribArray(1)
+
+        # Store the number of vertices per strip and number of strips
+        self.vertices_per_strip = grid_points * 2
+        self.num_strips = grid_points - 1
 
         glBindVertexArray(0)
 
     def draw_grid(self):
-        grid_points = self.terrain_size // self.terrain_step + 1
-
-        # Use shader program
+        """Draw the terrain grid using triangle strips"""
         glUseProgram(self.grid_shader)
 
         # Set uniforms
@@ -287,18 +290,14 @@ class RobotVisualizer:
         glUniformMatrix4fv(proj_loc, 1, GL_FALSE, proj_matrix)
         glUniformMatrix4fv(mv_loc, 1, GL_FALSE, mv_matrix)
 
-        # Draw grid
+        # Draw grid using triangle strips
         glBindVertexArray(self.grid_vao)
+        glPolygonMode(GL_FRONT_AND_BACK, GL_LINE)  # Draw wireframe
 
-        # Draw X lines
-        for i in range(grid_points):
-            glDrawArrays(GL_LINE_STRIP, i * grid_points, grid_points)
+        for i in range(self.num_strips):
+            glDrawArrays(GL_TRIANGLE_STRIP, i * self.vertices_per_strip, self.vertices_per_strip)
 
-        # Draw Z lines
-        offset = grid_points * grid_points
-        for i in range(grid_points):
-            glDrawArrays(GL_LINE_STRIP, offset + i * grid_points, grid_points)
-
+        glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)  # Reset polygon mode
         glBindVertexArray(0)
         glUseProgram(0)
 
@@ -367,16 +366,26 @@ class RobotVisualizer:
         if len(points) < 2:
             return
 
+        # Convert points to numpy array if not already
+        points = np.asarray(points, dtype=np.float32)
+
+        # Create and bind VAO if not exists
+        if not hasattr(self, 'trajectory_vao'):
+            self.trajectory_vao = glGenVertexArrays(1)
+            self.trajectory_vbo = glGenBuffers(1)
+
+        glBindVertexArray(self.trajectory_vao)
+        glBindBuffer(GL_ARRAY_BUFFER, self.trajectory_vbo)
+        glBufferData(GL_ARRAY_BUFFER, points.nbytes, points, GL_STREAM_DRAW)
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, None)
+        glEnableVertexAttribArray(0)
+
         glDisable(GL_LIGHTING)
         glColor3fv(color)
-
-        # Draw all points in a single line strip
-        glBegin(GL_LINE_STRIP)
-        for point in points:
-            glVertex3fv(point)
-        glEnd()
-
+        glDrawArrays(GL_LINE_STRIP, 0, len(points))
         glEnable(GL_LIGHTING)
+
+        glBindVertexArray(0)
 
     def draw_measurements(self, points, size=10):
         """Draw measurement points as coordinate frames"""
@@ -569,7 +578,10 @@ class RobotVisualizer:
         measurements, measurement_indices = generate_measurements(true_trajectory, dt)
 
         while running:
+            loop_start = time.time()
+
             # Handle events
+            event_start = time.time()
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     running = False
@@ -583,7 +595,7 @@ class RobotVisualizer:
                     elif event.key == pygame.K_x:
                         self.inset_show_axes = not self.inset_show_axes
                 elif event.type == pygame.MOUSEBUTTONDOWN:
-                    if event.button == 1:  # Left click
+                    if event.button == 1:
                         mouse_pressed = True
                         last_mouse_pos = pygame.mouse.get_pos()
                     elif event.button == 4:  # Mouse wheel up
@@ -591,7 +603,7 @@ class RobotVisualizer:
                     elif event.button == 5:  # Mouse wheel down
                         zoom *= 1.1
                 elif event.type == pygame.MOUSEBUTTONUP:
-                    if event.button == 1:  # Left click release
+                    if event.button == 1:
                         mouse_pressed = False
                 elif event.type == pygame.MOUSEMOTION and mouse_pressed:
                     current_mouse_pos = pygame.mouse.get_pos()
@@ -601,24 +613,30 @@ class RobotVisualizer:
                         rotation_y += dx * 0.5
                         rotation_x += dy * 0.5
                     last_mouse_pos = current_mouse_pos
+            event_time = time.time() - event_start
 
-            # Clear screen and set up camera
+            # Clear and setup
+            setup_start = time.time()
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
             glLoadIdentity()
 
-            # Apply camera transformations with zoom
+            # Apply camera transformations
             gluLookAt(500 * zoom, 300 * zoom, 500 * zoom,
                       0, 0, 0,
                       0, 1, 0)
             glRotatef(rotation_x, 1, 0, 0)
             glRotatef(rotation_y, 0, 1, 0)
+            setup_time = time.time() - setup_start
 
-            # Always draw grid in main view
+            # Main scene rendering
+            main_render_start = time.time()
             self.draw_grid()
             self.draw_axes()
             self.draw_runway()
+            main_render_time = time.time() - main_render_start
 
-            # Update current trajectories (only keep last N points)
+            # Trajectory updates and rendering
+            traj_start = time.time()
             start_idx = max(0, current_point - max_display_points + 1)
             points_to_show = min(max_display_points, current_point + 1)
 
@@ -645,15 +663,29 @@ class RobotVisualizer:
                 else:
                     ekf_orientation = 0
                 self.draw_aircraft_view(current_estimated[points_to_show-1], ekf_orientation, is_true=False)
+            traj_time = time.time() - traj_start
 
-            # Draw measurements up to current point
+            # Measurements rendering
+            meas_start = time.time()
             current_measurement_idx = np.searchsorted(measurement_indices, current_point)
             if current_measurement_idx > 0:
                 measurement_points = true_trajectory[measurement_indices[:current_measurement_idx]]
                 self.draw_measurements(measurement_points)
+            meas_time = time.time() - meas_start
 
+            # Display update
+            display_start = time.time()
             pygame.display.flip()
+            display_time = time.time() - display_start
+
             current_point = (current_point + 1) % len(true_trajectory)
+
+            total_time = time.time() - loop_start
+            print(f"Frame times (ms): Events: {event_time*1000:.1f}, Setup: {setup_time*1000:.1f}, "
+                  f"Main render: {main_render_time*1000:.1f}, Trajectories: {traj_time*1000:.1f}, "
+                  f"Measurements: {meas_time*1000:.1f}, Display: {display_time*1000:.1f}, "
+                  f"Total: {total_time*1000:.1f}")
+
             clock.tick(15)
 
     def draw_runway(self):
