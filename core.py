@@ -192,7 +192,8 @@ class RobotVisualizer:
 
         void main() {
             if (v_height == 0.0) {
-                fragColor = vec4(0.2, 0.2, 0.2, 1.0);  // Runway color, fully opaque
+                // Make runway area fully transparent
+                fragColor = vec4(0.0, 0.0, 0.0, 0.0);
             } else {
                 float t = v_height / 25.0;  // Normalize by max height
                 float alpha = min(0.2 + t * 0.8, 1.0);  // More opaque as height increases
