@@ -83,86 +83,68 @@ for i in range(len(t)):
 class RobotVisualizer:
     def __init__(self, width=800, height=600):
         pygame.init()
-
+        
         # Set up display with multisampling for antialiasing
         pygame.display.gl_set_attribute(pygame.GL_MULTISAMPLEBUFFERS, 1)
         pygame.display.gl_set_attribute(pygame.GL_MULTISAMPLESAMPLES, 4)
         pygame.display.set_mode((width, height), DOUBLEBUF | OPENGL)
         pygame.display.set_caption("3D Robot Trajectory")
-
+        
         # Store window dimensions
         self.width = width
         self.height = height
-
+        
         # Set up OpenGL
         glEnable(GL_DEPTH_TEST)
         glEnable(GL_LIGHTING)
         glEnable(GL_LIGHT0)
         glEnable(GL_COLOR_MATERIAL)
         glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE)
-
-        # Set up lighting with softer parameters
+        
+        # Set up lighting
         glLightfv(GL_LIGHT0, GL_POSITION, (1000.0, 1000.0, 1000.0, 0.0))
         glLightfv(GL_LIGHT0, GL_AMBIENT, (0.2, 0.2, 0.2, 1.0))
         glLightfv(GL_LIGHT0, GL_DIFFUSE, (0.3, 0.3, 0.3, 1.0))
         glLightModelfv(GL_LIGHT_MODEL_AMBIENT, (0.1, 0.1, 0.1, 1.0))
-
-        # Initialize shaders
-        self.grid_shader = self.create_grid_shader()
-
+        
+        # Initialize view settings
+        self.inset_show_grid = True
+        self.inset_show_runway = True
+        self.inset_show_axes = True
+        
         # Set up the scene
         self.resize(width, height)
-
-        # Enable antialiasing
-        glEnable(GL_LINE_SMOOTH)
-        glEnable(GL_BLEND)
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-        glHint(GL_LINE_SMOOTH_HINT, GL_NICEST)
-        glEnable(GL_MULTISAMPLE)  # Enable multisampling
-
-        # Add runway dimensions
-        self.runway_length = 300  # Length in meters
-        self.runway_width = 30    # Width in meters
-
-        # Camera parameters
-        self.camera_distance = 500
-        self.camera_x = 0
-        self.camera_y = 30
-        self.camera_z = 100
-        self.look_at = [0, 0, 0]
-        self.up_vector = [0, 1, 0]
-
-        # Mouse control state
-        self.prev_mouse_pos = None
-        self.mouse_button_down = False
-        self.rotation_x = 30
-        self.rotation_y = 0
-
-        # Add colors for different trajectories
-        self.true_color = (1, 0.5, 0)      # Orange for true trajectory
-        self.estimated_color = (0, 1, 0.5)  # Cyan for estimated trajectory
-        self.measurement_color = (1, 0, 1)  # Magenta for measurements
-        self.measurement_size = 5.0
-
-        # Add inset view parameters for both true and estimated views
-        self.inset_size = (200, 150)
-        self.true_inset_position = (20, 20)
-        self.ekf_inset_position = (240, 20)
-        self.inset_surface = pygame.Surface(self.inset_size)
-        self.inset_texture = glGenTextures(1)
-
-        # Increase terrain size and decrease step size for more detail
-        self.terrain_size = 2000  # Increased from 500
-        self.terrain_step = 25    # Halved from 50 for double density
+        
+        # Initialize runway parameters
+        self.runway_length = 400
+        self.runway_width = 30
+        
+        # Initialize terrain
+        self.terrain_size = 1000
+        self.terrain_step = 50
         self.terrain_grid = self.generate_terrain()
+        
+        # Initialize shader and buffers after OpenGL context is created
+        self.init_shaders()
+        
+        # Set up inset view positions and size
+        self.inset_size = (200, 150)
+        self.true_inset_position = (10, 10)
+        self.ekf_inset_position = (220, 10)
+        
+        # Colors
+        self.true_color = (0.2, 0.8, 0.2)  # Green for true trajectory
+        self.estimated_color = (0.8, 0.2, 0.2)  # Red for estimated trajectory
+        self.measurement_color = (0.8, 0.8, 0.2)  # Yellow for measurements
 
-        # Add visibility flags for inset view elements
-        self.inset_show_runway = True
-        self.inset_show_grid = True
-        self.inset_show_axes = True
-
-        # Create and bind vertex buffer objects for the grid
+    def init_shaders(self):
+        """Initialize shaders and store uniform locations"""
+        self.grid_shader = self.create_grid_shader()
         self.setup_grid_buffers()
+        
+        # Store shader uniform locations
+        self.proj_loc = glGetUniformLocation(self.grid_shader, "projection")
+        self.mv_loc = glGetUniformLocation(self.grid_shader, "modelview")
 
     def resize(self, width, height):
         """Handle window resize"""
@@ -279,24 +261,21 @@ class RobotVisualizer:
     def draw_grid(self):
         """Draw the terrain grid using triangle strips"""
         glUseProgram(self.grid_shader)
-
-        # Set uniforms
+        
+        # Set uniforms using stored locations
         proj_matrix = glGetFloatv(GL_PROJECTION_MATRIX)
         mv_matrix = glGetFloatv(GL_MODELVIEW_MATRIX)
-
-        proj_loc = glGetUniformLocation(self.grid_shader, "projection")
-        mv_loc = glGetUniformLocation(self.grid_shader, "modelview")
-
-        glUniformMatrix4fv(proj_loc, 1, GL_FALSE, proj_matrix)
-        glUniformMatrix4fv(mv_loc, 1, GL_FALSE, mv_matrix)
-
+        
+        glUniformMatrix4fv(self.proj_loc, 1, GL_FALSE, proj_matrix)
+        glUniformMatrix4fv(self.mv_loc, 1, GL_FALSE, mv_matrix)
+        
         # Draw grid using triangle strips
         glBindVertexArray(self.grid_vao)
         glPolygonMode(GL_FRONT_AND_BACK, GL_LINE)  # Draw wireframe
-
+        
         for i in range(self.num_strips):
             glDrawArrays(GL_TRIANGLE_STRIP, i * self.vertices_per_strip, self.vertices_per_strip)
-
+        
         glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)  # Reset polygon mode
         glBindVertexArray(0)
         glUseProgram(0)
