@@ -65,19 +65,23 @@ def ekf_predict(state, P, Q, dt):
     print(f"Position: ({x:.2f}, {y:.2f}, {z:.2f})")
     print(f"Velocity: ({vx:.2f}, {vy:.2f}, {vz:.2f})")
 
-    # State prediction using process model f
-    # dx/dt = vx, dy/dt = vy, dz/dt = vz
-    # d(vx)/dt = 0, d(vy)/dt = 0, d(vz)/dt = 0
-    # d(qw)/dt = 0, d(qx)/dt = 0, d(qy)/dt = 0, d(qz)/dt = 0
+    # Add moderate process noise to the prediction
+    noise_scale = 0.1  # Reduced from 1.0
+    position_noise = np.random.normal(0, 0.5 * noise_scale, 3)  # Reduced from 2.0
+    velocity_noise = np.random.normal(0, 0.1 * noise_scale, 3)  # Reduced from 0.5
+
+    # State prediction using process model f with added noise
     state_pred = np.zeros_like(state)
 
-    # Update positions using current velocities
-    state_pred[0] = x + vx * dt  # x += vx*dt
-    state_pred[1] = y + vy * dt  # y += vy*dt
-    state_pred[2] = z + vz * dt  # z += vz*dt
+    # Update positions using current velocities plus noise
+    state_pred[0] = x + (vx * dt) + position_noise[0]
+    state_pred[1] = y + (vy * dt) + position_noise[1]
+    state_pred[2] = z + (vz * dt) + position_noise[2]
 
-    # Keep velocities constant
-    state_pred[3:6] = state[3:6]
+    # Update velocities with noise
+    state_pred[3] = vx + velocity_noise[0]
+    state_pred[4] = vy + velocity_noise[1]
+    state_pred[5] = vz + velocity_noise[2]
 
     # Keep quaternion constant
     state_pred[6:10] = state[6:10]
@@ -95,8 +99,9 @@ def ekf_predict(state, P, Q, dt):
     # Calculate Jacobian F at current state
     F = np.array(F_num(x, y, z, vx, vy, vz, qw, qx, qy, qz), dtype=float)
 
-    # Covariance prediction
-    P_pred = F @ P @ F.T + Q
+    # Covariance prediction with moderate process noise
+    Q_scaled = Q * 2.0  # Reduced from 10.0
+    P_pred = F @ P @ F.T + Q_scaled
 
     return state_pred, P_pred
 
@@ -140,7 +145,7 @@ def robot_motion(state, t):
 true_states = odeint(robot_motion, x0, t)
 
 # Add noise to velocity measurements (separate position and orientation noise)
-position_noise = 0.1
+position_noise = 10.0  # Increased from 0.1
 orientation_noise = 0.05
 
 # Generate noisy measurements for position and orientation
@@ -185,7 +190,10 @@ class RobotVisualizer:
         glEnable(GL_LIGHT0)
         glEnable(GL_COLOR_MATERIAL)
         glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE)
-
+        
+        # Add this line to set the background color to light grey
+        glClearColor(0.8, 0.8, 0.8, 1.0)  # Light grey background
+        
         # Set up lighting
         glLightfv(GL_LIGHT0, GL_POSITION, (1000.0, 1000.0, 1000.0, 0.0))
         glLightfv(GL_LIGHT0, GL_AMBIENT, (0.2, 0.2, 0.2, 1.0))
@@ -213,9 +221,9 @@ class RobotVisualizer:
         self.init_shaders()
 
         # Set up inset view positions and size
-        self.inset_size = (200, 150)
-        self.true_inset_position = (10, 10)
-        self.ekf_inset_position = (220, 10)
+        self.inset_size = (400, 300)
+        self.true_inset_position = (width - self.inset_size[0] - 10, 10)  # Top inset
+        self.ekf_inset_position = (width - self.inset_size[0] - 10, 320)  # Bottom inset (10px margin between insets)
 
         # Colors
         self.true_color = (1, 0.5, 0)      # Orange for true trajectory
@@ -390,19 +398,20 @@ class RobotVisualizer:
         glDisable(GL_BLEND)
 
     def draw_axes(self, size=100):
+        height = 0.5  # Same height as runway
         glBegin(GL_LINES)
         # X axis (red)
         glColor3f(1, 0, 0)
-        glVertex3f(0, 0, 0)
-        glVertex3f(size, 0, 0)
+        glVertex3f(0, height, 0)
+        glVertex3f(size, height, 0)
         # Y axis (green)
         glColor3f(0, 1, 0)
-        glVertex3f(0, 0, 0)
-        glVertex3f(0, size, 0)
+        glVertex3f(0, height, 0)
+        glVertex3f(0, size + height, 0)  # Y axis goes up from the raised position
         # Z axis (blue)
         glColor3f(0, 0, 1)
-        glVertex3f(0, 0, 0)
-        glVertex3f(0, 0, size)
+        glVertex3f(0, height, 0)
+        glVertex3f(0, height, size)
         glEnd()
 
     def draw_robot(self, position, scale=10):
@@ -550,13 +559,71 @@ class RobotVisualizer:
         # Disable depth test and lighting for background quad
         glDisable(GL_DEPTH_TEST)
         glDisable(GL_LIGHTING)
-        glColor4f(0, 0, 0, 1.0)  # Fully opaque black
+        
+        # Draw background
+        glColor4f(0.8, 0.8, 0.8, 1.0)  # Light grey background
         glBegin(GL_QUADS)
         glVertex2f(0, 0)
         glVertex2f(self.inset_size[0], 0)
         glVertex2f(self.inset_size[0], self.inset_size[1])
         glVertex2f(0, self.inset_size[1])
         glEnd()
+
+        # Enable blending for transparent border
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        
+        # Draw semi-transparent red border
+        glColor4f(1.0, 0.0, 0.0, 0.5)  # Red with 50% transparency
+        glLineWidth(2.0)
+        glBegin(GL_LINE_LOOP)
+        glVertex2f(0, 0)
+        glVertex2f(self.inset_size[0], 0)
+        glVertex2f(self.inset_size[0], self.inset_size[1])
+        glVertex2f(0, self.inset_size[1])
+        glEnd()
+        glLineWidth(1.0)
+        
+        # Draw label in bottom-left corner
+        glColor4f(0.3, 0.3, 0.3, 1.0)  # Dark grey for text
+        label = "True View" if is_true else "Estimated View"
+        
+        # Switch to 2D rendering for text
+        glMatrixMode(GL_PROJECTION)
+        glLoadIdentity()
+        glOrtho(0, self.inset_size[0], 0, self.inset_size[1], -1, 1)
+        glMatrixMode(GL_MODELVIEW)
+        glLoadIdentity()
+        
+        # Render text using pygame with monospace font
+        font = pygame.font.SysFont('courier', 12) 
+        text = font.render(label, True, (77, 77, 77))  # Grey text (RGB: 77,77,77)
+        text_surface = pygame.image.tostring(text, 'RGBA', True)
+        text_width, text_height = text.get_size()
+        
+        # Enable texture for text rendering
+        glEnable(GL_TEXTURE_2D)
+        texture = glGenTextures(1)
+        glBindTexture(GL_TEXTURE_2D, texture)
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, text_width, text_height, 0, GL_RGBA, GL_UNSIGNED_BYTE, text_surface)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+        
+        # Draw textured quad for text
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        glColor4f(1.0, 1.0, 1.0, 1.0)
+        glBegin(GL_QUADS)
+        glTexCoord2f(0, 0); glVertex2f(10, 10)  # Fixed texture coordinates
+        glTexCoord2f(1, 0); glVertex2f(10 + text_width, 10)
+        glTexCoord2f(1, 1); glVertex2f(10 + text_width, 10 + text_height)
+        glTexCoord2f(0, 1); glVertex2f(10, 10 + text_height)
+        glEnd()
+        
+        # Clean up
+        glDeleteTextures([texture])
+        glDisable(GL_TEXTURE_2D)
+        glDisable(GL_BLEND)
 
         # Re-enable depth test and lighting for 3D scene
         glEnable(GL_DEPTH_TEST)
@@ -632,32 +699,20 @@ class RobotVisualizer:
         return camera_points
 
     def draw_runway(self):
-        """Draw runway as a rectangle on the ground"""
-        # Draw main runway surface
-        glColor3f(0.2, 0.2, 0.2)  # Darker gray for better contrast
+        """Draw runway as an outlined rectangle slightly above the ground"""
         l, w = self.runway_length/2, self.runway_width/2
-
-        glBegin(GL_QUADS)
-        glVertex3f(-l, 0, -w)
-        glVertex3f(l, 0, -w)
-        glVertex3f(l, 0, w)
-        glVertex3f(-l, 0, w)
+        height = 0.5  # Increased height above ground to prevent z-fighting
+        
+        # Draw runway edge lines in red
+        glColor3f(1, 0, 0)  # Red
+        glLineWidth(2.0)  # Make the lines a bit thicker
+        glBegin(GL_LINE_LOOP)  # Use LINE_LOOP to draw the outline
+        glVertex3f(-l, height, -w)
+        glVertex3f(l, height, -w)
+        glVertex3f(l, height, w)
+        glVertex3f(-l, height, w)
         glEnd()
-
-        # Draw runway edge lines
-        glColor3f(1, 1, 1)  # White
-        glBegin(GL_LINES)
-        # Long edges
-        glVertex3f(-l, 0, -w)
-        glVertex3f(l, 0, -w)
-        glVertex3f(-l, 0, w)
-        glVertex3f(l, 0, w)
-        # Threshold lines
-        glVertex3f(-l, 0, -w)
-        glVertex3f(-l, 0, w)
-        glVertex3f(l, 0, -w)
-        glVertex3f(l, 0, w)
-        glEnd()
+        glLineWidth(1.0)  # Reset line width to default
 
     def generate_terrain(self):
         grid_points = self.terrain_size // self.terrain_step + 1
@@ -758,21 +813,20 @@ class RobotVisualizer:
         else:
             state = initial_state.copy()
 
-        # Initialize covariances with higher uncertainty for unobserved states
+        # Initialize covariances with higher uncertainty
         P = np.eye(10)
-        P[:3, :3] *= 1.0    # Position uncertainty (observed)
-        P[3:6, 3:6] *= 2.0  # Velocity uncertainty (unobserved but correlated with position)
-        P[6:, 6:] *= 5.0    # Orientation uncertainty (unobserved)
+        P[:3, :3] *= 10.0   # Much higher position uncertainty
+        P[3:6, 3:6] *= 5.0  # Higher velocity uncertainty
+        P[6:, 6:] *= 5.0    # Orientation uncertainty
 
-        # Process noise - keep this relatively low to trust our motion model
+        # Process noise - increased significantly
         Q = np.eye(10)
-        Q[:3, :3] *= 0.1     # Position process noise (low - trust the motion model)
-        Q[3:6, 3:6] *= 0.5   # Velocity process noise (moderate - allow some velocity changes)
-        Q[6:, 6:] *= 0.01    # Orientation process noise (very low - assume constant)
+        Q[:3, :3] *= 1.0    # Higher position process noise
+        Q[3:6, 3:6] *= 0.5  # Moderate velocity process noise
+        Q[6:, 6:] *= 0.01   # Low orientation process noise
 
-        # Measurement noise - make this high to trust measurements less
-        measurement_noise = 10.0  # Noise standard deviation for position measurements
-        R = np.eye(3) * (measurement_noise * 5.0)**2  # Much higher measurement uncertainty
+        # Measurement noise (not used while updates are disabled)
+        R = np.eye(3) * 100.0  # High measurement uncertainty
 
         while running:
             loop_start = time.time()
@@ -818,14 +872,21 @@ class RobotVisualizer:
             # First predict
             state_pred, P_pred = ekf_predict(state, P, Q, dt)
 
-            # Then update if measurement is available
-            current_measurement_idx = np.searchsorted(measurement_indices, current_point)
-            if current_measurement_idx < len(measurements) and measurement_indices[current_measurement_idx] == current_point:
-                # Get current measurement (only position)
-                meas = measurements[current_measurement_idx]
-                state, P = ekf_update(state_pred, P_pred, meas, R)
+            # Define measurement index (even though we're not using it right now)
+            current_measurement_idx = 0
+            if measurements is not None:
+                current_measurement_idx = np.searchsorted(measurement_indices, current_point)
+
+            # Update step temporarily disabled (but keeping the code)
+            if False:  # Disabled updates
+                if current_measurement_idx < len(measurements) and measurement_indices[current_measurement_idx] == current_point:
+                    meas = measurements[current_measurement_idx]
+                    state, P = ekf_update(state_pred, P_pred, meas, R)
+                else:
+                    state = state_pred
+                    P = P_pred
             else:
-                # No measurement, just use prediction
+                # Just use prediction
                 state = state_pred
                 P = P_pred
 
