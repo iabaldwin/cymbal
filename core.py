@@ -1,5 +1,6 @@
 import time
 import math
+import os
 
 from OpenGL.GL import *
 from OpenGL.GL import shaders
@@ -10,6 +11,7 @@ from scipy.spatial.transform import Rotation
 import numpy as np
 import pygame
 import sympy as sp
+from PIL import Image
 
 # Define symbolic variables for state and measurement
 x, y, z = sp.symbols('x y z')  # positions
@@ -225,6 +227,15 @@ class RobotVisualizer:
         self.auto_orbit = True
         self.orbit_speed = 0.15  # degrees per frame
         self.orbit_time = 0
+
+        # Add to existing __init__
+        self.recording = False
+        self.frame_count = 0
+        self.output_dir = "output_frames"
+        
+        # Create output directory if it doesn't exist
+        if not os.path.exists(self.output_dir):
+            os.makedirs(self.output_dir)
 
     def init_shaders(self):
         """Initialize shaders and store uniform locations"""
@@ -472,6 +483,12 @@ class RobotVisualizer:
                     self.inset_show_grid = not self.inset_show_grid
                 elif event.key == pygame.K_x:  # Toggle axes
                     self.inset_show_axes = not self.inset_show_axes
+                elif event.key == pygame.K_c:  # Add this new key handler
+                    self.recording = not self.recording
+                    if self.recording:
+                        print("Started recording frames")
+                    else:
+                        print("Stopped recording frames")
             elif event.type == pygame.MOUSEBUTTONDOWN:
                 # Disable auto-orbit on any mouse click
                 self.auto_orbit = False
@@ -705,6 +722,27 @@ class RobotVisualizer:
             pygame.display.get_surface().blit(text, (10, y))
             y += 20
 
+    def save_frame(self):
+        """Save the current frame as a PNG file"""
+        if self.recording:
+            # Read the OpenGL buffer directly
+            glPixelStorei(GL_PACK_ALIGNMENT, 1)
+            data = glReadPixels(0, 0, self.width, self.height, GL_RGBA, GL_UNSIGNED_BYTE)
+            image_array = np.frombuffer(data, dtype=np.uint8)
+            image_array = image_array.reshape((self.height, self.width, 4))
+            
+            # OpenGL gives the image upside down, so we need to flip it
+            image_array = np.flipud(image_array)
+            
+            # Convert to PIL Image and save
+            image = Image.fromarray(image_array, 'RGBA')
+            filename = os.path.join(self.output_dir, f"frame_{self.frame_count:04d}.png")
+            image.save(filename)
+            self.frame_count += 1
+            
+            if self.frame_count % 10 == 0:  # Print status every 10 frames
+                print(f"Saved frame {self.frame_count}")
+
     def run_simulation(self, true_trajectory, estimated_trajectory, measurements=None, initial_state=None):
         current_point = 0
         running = True
@@ -837,7 +875,9 @@ class RobotVisualizer:
             if len(current_estimated) > 0:
                 self.draw_aircraft_view(current_estimated[-1], estimated_orientation, is_true=False)
 
-            # Flip display buffers
+            # Add this just before pygame.display.flip()
+            self.save_frame()
+            
             flip_start = time.time()
             pygame.display.flip()
             flip_time = time.time() - flip_start
