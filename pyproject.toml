@@ -11,5 +11,6 @@ dependencies = [
 	"matplotlib",
 	"pyopengl",
 	"pyflame",
-	"opencv-python"
+	"opencv-python",
+	"pygame>=2.6.1",
 ]

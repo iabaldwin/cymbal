@@ -217,8 +217,8 @@ class RobotVisualizer:
         self.terrain_step = 50
         self.terrain_grid = self.generate_terrain()
 
-        # Initialize shader and buffers after OpenGL context is created
-        self.init_shaders()
+        # Initialize grid buffers
+        self.setup_grid_buffers()
 
         # Set up inset view positions and size
         self.inset_size = (400, 300)
@@ -245,15 +245,6 @@ class RobotVisualizer:
         if not os.path.exists(self.output_dir):
             os.makedirs(self.output_dir)
 
-    def init_shaders(self):
-        """Initialize shaders and store uniform locations"""
-        self.grid_shader = self.create_grid_shader()
-        self.setup_grid_buffers()
-
-        # Store shader uniform locations
-        self.proj_loc = glGetUniformLocation(self.grid_shader, "projection")
-        self.mv_loc = glGetUniformLocation(self.grid_shader, "modelview")
-
     def resize(self, width, height):
         """Handle window resize"""
         if height == 0:
@@ -277,14 +268,14 @@ class RobotVisualizer:
 
     def create_grid_shader(self):
         vertex_shader = """
-        #version 330
-        layout(location = 0) in vec3 position;
-        layout(location = 1) in float height;
+        #version 120
+        attribute vec3 position;
+        attribute float height;
 
         uniform mat4 projection;
         uniform mat4 modelview;
 
-        out float v_height;
+        varying float v_height;
 
         void main() {
             gl_Position = projection * modelview * vec4(position, 1.0);
@@ -293,20 +284,18 @@ class RobotVisualizer:
         """
 
         fragment_shader = """
-        #version 330
-        in float v_height;
-
-        out vec4 fragColor;
+        #version 120
+        varying float v_height;
 
         void main() {
             if (v_height == 0.0) {
                 // Make runway area fully transparent
-                fragColor = vec4(0.0, 0.0, 0.0, 0.0);
+                gl_FragColor = vec4(0.0, 0.0, 0.0, 0.0);
             } else {
                 float t = v_height / 25.0;  // Normalize by max height
                 float alpha = min(0.2 + t * 0.8, 1.0);  // More opaque as height increases
                 // Grey to blue interpolation with transparency
-                fragColor = vec4(0.3*(1.0-t), 0.3*(1.0-t), 0.3 + 0.7*t, alpha);
+                gl_FragColor = vec4(0.3*(1.0-t), 0.3*(1.0-t), 0.3 + 0.7*t, alpha);
             }
         }
         """
@@ -320,79 +309,58 @@ class RobotVisualizer:
         return shader
 
     def setup_grid_buffers(self):
+        # Generate grid for immediate mode rendering
         grid_points = self.terrain_size // self.terrain_step + 1
         half_grid = grid_points // 2
 
         # Generate grid points using numpy
         x = np.linspace(-half_grid * self.terrain_step, half_grid * self.terrain_step, grid_points)
         z = np.linspace(-half_grid * self.terrain_step, half_grid * self.terrain_step, grid_points)
-        X, Z = np.meshgrid(x, z)
-
-        # Create vertices for triangle strips
-        vertices = []
-        heights = []
-
-        # Create triangle strips
-        for i in range(grid_points-1):
-            for j in range(grid_points):
-                # Add two vertices for each column (current and next row)
-                vertices.append([X[i,j], self.terrain_grid[i,j], Z[i,j]])
-                vertices.append([X[i+1,j], self.terrain_grid[i+1,j], Z[i+1,j]])
-                heights.append(self.terrain_grid[i,j])
-                heights.append(self.terrain_grid[i+1,j])
-
-        vertices = np.array(vertices, dtype=np.float32)
-        heights = np.array(heights, dtype=np.float32)
-
-        # Create and bind VAO
-        self.grid_vao = glGenVertexArrays(1)
-        glBindVertexArray(self.grid_vao)
-
-        # Vertex buffer
-        self.grid_vbo = glGenBuffers(1)
-        glBindBuffer(GL_ARRAY_BUFFER, self.grid_vbo)
-        glBufferData(GL_ARRAY_BUFFER, vertices.nbytes, vertices, GL_STATIC_DRAW)
-        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, None)
-        glEnableVertexAttribArray(0)
-
-        # Height buffer
-        self.height_vbo = glGenBuffers(1)
-        glBindBuffer(GL_ARRAY_BUFFER, self.height_vbo)
-        glBufferData(GL_ARRAY_BUFFER, heights.nbytes, heights, GL_STATIC_DRAW)
-        glVertexAttribPointer(1, 1, GL_FLOAT, GL_FALSE, 0, None)
-        glEnableVertexAttribArray(1)
-
-        # Store the number of vertices per strip and number of strips
-        self.vertices_per_strip = grid_points * 2
-        self.num_strips = grid_points - 1
-
-        glBindVertexArray(0)
+        self.X, self.Z = np.meshgrid(x, z)
+        self.grid_points = grid_points
 
     def draw_grid(self):
-        """Draw the terrain grid using triangle strips"""
+        """Draw the terrain grid using immediate mode"""
         # Enable blending for transparency
         glEnable(GL_BLEND)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
 
-        glUseProgram(self.grid_shader)
+        # Disable lighting for grid
+        glDisable(GL_LIGHTING)
 
-        # Set uniforms using stored locations
-        proj_matrix = glGetFloatv(GL_PROJECTION_MATRIX)
-        mv_matrix = glGetFloatv(GL_MODELVIEW_MATRIX)
+        # Draw grid as lines
+        grid_points = self.grid_points
 
-        glUniformMatrix4fv(self.proj_loc, 1, GL_FALSE, proj_matrix)
-        glUniformMatrix4fv(self.mv_loc, 1, GL_FALSE, mv_matrix)
+        for i in range(grid_points - 1):
+            for j in range(grid_points - 1):
+                # Get heights for this quad
+                h1 = self.terrain_grid[i, j]
+                h2 = self.terrain_grid[i, j + 1]
+                h3 = self.terrain_grid[i + 1, j + 1]
+                h4 = self.terrain_grid[i + 1, j]
 
-        # Draw grid using triangle strips
-        glBindVertexArray(self.grid_vao)
-        glPolygonMode(GL_FRONT_AND_BACK, GL_LINE)  # Draw wireframe
+                # Skip if all heights are zero (runway area)
+                if h1 == 0 and h2 == 0 and h3 == 0 and h4 == 0:
+                    continue
 
-        for i in range(self.num_strips):
-            glDrawArrays(GL_TRIANGLE_STRIP, i * self.vertices_per_strip, self.vertices_per_strip)
+                # Calculate color based on height
+                max_h = max(h1, h2, h3, h4)
+                t = min(max_h / 25.0, 1.0)
+                alpha = min(0.2 + t * 0.8, 1.0)
 
-        glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)  # Reset polygon mode
-        glBindVertexArray(0)
-        glUseProgram(0)
+                # Grey to blue interpolation
+                glColor4f(0.3 * (1.0 - t), 0.3 * (1.0 - t), 0.3 + 0.7 * t, alpha)
+
+                # Draw quad as lines
+                glBegin(GL_LINE_LOOP)
+                glVertex3f(self.X[i, j], h1, self.Z[i, j])
+                glVertex3f(self.X[i, j + 1], h2, self.Z[i, j + 1])
+                glVertex3f(self.X[i + 1, j + 1], h3, self.Z[i + 1, j + 1])
+                glVertex3f(self.X[i + 1, j], h4, self.Z[i + 1, j])
+                glEnd()
+
+        # Re-enable lighting
+        glEnable(GL_LIGHTING)
 
         # Disable blending
         glDisable(GL_BLEND)

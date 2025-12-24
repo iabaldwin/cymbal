@@ -1,5 +1,7 @@
 # Cymbal
 
+![3D EKF Visualization](media/header.gif)
+
 <div align="center">
 
 **A 3D Extended Kalman Filter Visualization for Aircraft Trajectory Tracking**
